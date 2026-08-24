@@ -1,0 +1,27 @@
+{
+  "name": "dsh-memory-loader",
+  "version": "1.0.0",
+  "description": "Deterministic two-level memory injection for DeepSeek Harness: global and project MEMORY.md plus today's notes, auto-loaded into every new session.",
+  "type": "module",
+  "main": "./dsh-memory-loader.mjs",
+  "scripts": {
+    "test": "node selfcheck.mjs"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "memory",
+    "auto-memory",
+    "cordis"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@deepseek-ai/dsh-llm": "^0.0.1-rc.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

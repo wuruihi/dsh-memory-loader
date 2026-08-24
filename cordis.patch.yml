@@ -1,0 +1,7 @@
+# One installable bundle row mounts the memory loader.
+- insert:
+    - id: dsh-memory-loader
+      name: dsh-memory-loader
+      config:
+        maxBytes: 16384
+        maxSourceBytes: 65536
