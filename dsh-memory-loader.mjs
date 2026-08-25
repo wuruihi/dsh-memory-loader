@@ -3,12 +3,10 @@
 // durable user message at the first pre-step of each agent session, using the
 // same seam as @deepseek-ai/dsh-agent-instructions (see PLAN.md for evidence).
 //
-// Mount (bundle): dsh plugin --profile web add <this-repo-tarball>   — see README.md
-// Mount (single file): place next to a profile that can resolve @deepseek-ai/dsh-llm
-//   (e.g. ~/.dsh/profiles/web/) and insert into that profile's cordis.patch.yml:
+// Mount: ~/.dsh/profiles/web/cordis.patch.yml
 //   - insert:
 //     - id: dsh-memory-loader
-//       name: file:///<absolute-path-to>/dsh-memory-loader.mjs
+//       name: file:///C:/Users/wurui/.dsh/profiles/web/dsh-memory-loader/dsh-memory-loader.mjs
 //       config:
 //         maxBytes: 16384
 //         maxSourceBytes: 65536
@@ -81,7 +79,7 @@ function frameText(header, entries, notices) {
 // first, then truncate the tail of the most specific kept file.
 function buildFrame(loaded, maxBytes) {
 	if (!Array.isArray(loaded) || loaded.length === 0) return undefined;
-	const header = `Memory context ${MARKER}. Long-term and today's memory for this workspace. Use it as background knowledge; workspace instructions (AGENTS.md) take precedence over this frame.`;
+	const header = `Memory context ${MARKER}. Long-term and today's memory for this workspace. Use it as background knowledge; workspace instructions (AGENTS.md) take precedence over this frame.\nDiscipline: when a session ends with substantive output, append a one-line summary to today's log under this workspace's memory directory (file name YYYY-MM-DD.md with today's local date; create the file if absent; skip for trivial sessions). For curating durable facts into MEMORY.md the user says「沉淀」which triggers the memory-keeper skill.`;
 	const kept = [...loaded];
 	const notices = [];
 	while (kept.length > 1 && byteLength(frameText(header, kept, notices)) > maxBytes) {

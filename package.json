@@ -1,6 +1,6 @@
 {
   "name": "dsh-memory-loader",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Deterministic two-level memory injection for DeepSeek Harness: global and project MEMORY.md plus today's notes, auto-loaded into every new session.",
   "type": "module",
   "main": "./dsh-memory-loader.mjs",
