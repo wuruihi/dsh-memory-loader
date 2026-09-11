@@ -1,4 +1,4 @@
-// dsh-memory-loader v1.2 — deterministic memory injection at session start.
+// dsh-memory-loader v1.3 — deterministic memory injection at session start.
 // Injects two-level memory (global ~/.dsh/memory + project <cwd>/memory) as a
 // durable user message at the first pre-step of each agent session, using the
 // same seam as @deepseek-ai/dsh-agent-instructions (see PLAN.md for evidence).
@@ -10,11 +10,20 @@
 //       config:
 //         maxBytes: 16384
 //         maxSourceBytes: 65536
+//         dailyLogMode: pointer
 //         dailyLogMaxBytes: 4096
 //
-// Budget policy: daily logs (YYYY-MM-DD.md) are byte-capped first so a long day
-// log can never evict a MEMORY.md; then whole least-specific files are dropped;
-// only then is the tail of the most specific kept file truncated.
+// Content policy (what deserves a slot in *every* session): MEMORY.md indexes
+// are pointers by nature and are injected whole; day logs are push-only flow
+// records whose reader is the curator, not the working session — so by default
+// (dailyLogMode: pointer) only a one-line pointer is injected and the body is
+// read on demand. dailyLogMode: full restores v1.2 behaviour (byte-capped body),
+// "off" drops day logs entirely.
+//
+// Budget policy: daily logs are reduced first (pointer by default, capped body
+// in "full") so a long day log can never evict a MEMORY.md; then whole
+// least-specific files are dropped; only then is the tail of the most specific
+// kept file truncated.
 
 import { stat, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -25,6 +34,8 @@ export const PLUGIN_NAME = "dsh-memory-loader";
 const DEFAULT_MAX_BYTES = 16384;
 const DEFAULT_MAX_SOURCE_BYTES = 65536;
 const DEFAULT_DAILY_LOG_MAX_BYTES = 4096;
+const DEFAULT_DAILY_LOG_MODE = "pointer";
+const DAILY_LOG_MODES = new Set(["pointer", "full", "off"]);
 const TRUNCATION_SUFFIX = "\n\n...(truncated; read the full file for the rest)";
 const DAILY_LOG_LABEL = /(^|\/)\d{4}-\d{2}-\d{2}\.md$/;
 const MEMORY_DIR = "memory";
@@ -50,6 +61,36 @@ function byteLength(text) {
 
 function isDailyLog(label) {
 	return DAILY_LOG_LABEL.test(String(label));
+}
+
+function normalizeDailyLogMode(value) {
+	if (typeof value !== "string") return undefined;
+	const mode = value.trim().toLowerCase();
+	return DAILY_LOG_MODES.has(mode) ? mode : undefined;
+}
+
+// One log entry = one markdown bullet line (the write-side discipline), so the
+// pointer can tell the model how much happened today without injecting any of it.
+function countLogEntries(content) {
+	let count = 0;
+	for (const line of String(content).split(/\r?\n/)) {
+		if (/^-\s+\S/.test(line)) count += 1;
+	}
+	return count;
+}
+
+function humanBytes(bytes) {
+	return bytes >= 1024 ? `${(bytes / 1024).toFixed(1)} KB` : `${bytes} B`;
+}
+
+// Pointer form: the day file stays discoverable (deterministic knowledge that it
+// exists and where), while its body is paid for only when a session actually
+// needs it.
+function dailyLogPointer(content) {
+	const entries = countLogEntries(content);
+	const size = humanBytes(byteLength(content));
+	const scale = entries > 0 ? `${entries} 条 / ${size}` : size;
+	return `（当日日志未注入正文：${scale}。需要回顾今天发生了什么时，用 read 工具读取本文件全文。）`;
 }
 
 // Byte-accurate head cut: the kept text plus `suffix` is at most `limit` bytes,
@@ -119,15 +160,34 @@ function buildFrame(loaded, maxBytes, options = {}) {
 	const entries = Array.isArray(loaded) ? loaded : [];
 	const rawDaily = Number(options?.dailyLogMaxBytes);
 	const dailyLogMaxBytes = Number.isSafeInteger(rawDaily) && rawDaily > 0 ? rawDaily : DEFAULT_DAILY_LOG_MAX_BYTES;
+	const dailyLogMode = normalizeDailyLogMode(options?.dailyLogMode) ?? DEFAULT_DAILY_LOG_MODE;
 	const notices = Array.isArray(options?.notices) ? [...options.notices] : [];
 	if (entries.length === 0 && notices.length === 0) return undefined;
-	const header = `Memory context ${MARKER}. Long-term and today's memory for this workspace. Use it as background knowledge; workspace instructions (AGENTS.md) take precedence over this frame.\nDiscipline: when a session ends with substantive output, append a one-line summary to today's log under this workspace's memory directory (file name YYYY-MM-DD.md with today's local date; create the file if absent; skip for trivial sessions). Keep each log entry to one line and move long detail into a named topic file under memory/: daily logs are capped at ${dailyLogMaxBytes} bytes when injected. For curating durable facts into MEMORY.md the user says「沉淀」which triggers the memory-keeper skill.`;
-	const kept = entries.map((entry) => {
-		if (!isDailyLog(entry.label)) return entry;
-		if (byteLength(entry.content) <= dailyLogMaxBytes) return entry;
+	const dailyNote = dailyLogMode === "pointer"
+		? "daily logs are not injected; this frame only points at the day file, read it when you need today's detail"
+		: dailyLogMode === "off"
+			? "daily logs are not injected"
+			: `daily logs are capped at ${dailyLogMaxBytes} bytes when injected`;
+	const header = `Memory context ${MARKER}. Long-term and today's memory for this workspace. Use it as background knowledge; workspace instructions (AGENTS.md) take precedence over this frame.\nDiscipline: when a session ends with substantive output, append a one-line summary to today's log under this workspace's memory directory (file name YYYY-MM-DD.md with today's local date; create the file if absent; skip for trivial sessions). Keep each log entry to one line and move long detail into a named topic file under memory/: ${dailyNote}. For curating durable facts into MEMORY.md the user says「沉淀」which triggers the memory-keeper skill.`;
+	const kept = [];
+	for (const entry of entries) {
+		if (!isDailyLog(entry.label)) {
+			kept.push(entry);
+			continue;
+		}
+		if (dailyLogMode === "off") continue;
+		if (dailyLogMode === "pointer") {
+			kept.push({ ...entry, content: dailyLogPointer(entry.content) });
+			continue;
+		}
+		if (byteLength(entry.content) <= dailyLogMaxBytes) {
+			kept.push(entry);
+			continue;
+		}
 		notices.push(`capped ${entry.label} to ${dailyLogMaxBytes} bytes (daily log)`);
-		return { ...entry, content: truncateToBytes(entry.content, dailyLogMaxBytes) };
-	});
+		kept.push({ ...entry, content: truncateToBytes(entry.content, dailyLogMaxBytes) });
+	}
+	if (kept.length === 0) return notices.length > 0 ? frameText(header, kept, notices) : undefined;
 	while (kept.length > 1 && byteLength(frameText(header, kept, notices)) > maxBytes) {
 		const dropped = kept.shift();
 		notices.push(`omitted ${dropped.label}`);
@@ -187,6 +247,7 @@ export function apply(ctx, config = {}) {
 	const maxBytes = Number.isSafeInteger(rawMax) && rawMax > 0 ? rawMax : DEFAULT_MAX_BYTES;
 	const maxSourceBytes = Number.isSafeInteger(rawSource) && rawSource > 0 ? rawSource : DEFAULT_MAX_SOURCE_BYTES;
 	const dailyLogMaxBytes = Number.isSafeInteger(rawDaily) && rawDaily > 0 ? rawDaily : DEFAULT_DAILY_LOG_MAX_BYTES;
+	const dailyLogMode = normalizeDailyLogMode(config?.dailyLogMode) ?? DEFAULT_DAILY_LOG_MODE;
 	const composed = new WeakSet();
 
 	ctx.on("agent/pre-step", async ({ agent, messages, signal }, next) => {
@@ -220,7 +281,7 @@ export function apply(ctx, config = {}) {
 			composed.add(agent);
 			if (loaded.length === 0 && notices.length === 0) return decision;
 
-			const text = buildFrame(loaded, maxBytes, { dailyLogMaxBytes, notices });
+			const text = buildFrame(loaded, maxBytes, { dailyLogMaxBytes, dailyLogMode, notices });
 			if (text === undefined) return decision;
 			const desired = createUserMessage({
 				content: [{ type: "text", text }],
@@ -243,10 +304,14 @@ export function apply(ctx, config = {}) {
 export const __internals = {
 	MARKER,
 	DEFAULT_DAILY_LOG_MAX_BYTES,
+	DEFAULT_DAILY_LOG_MODE,
 	TRUNCATION_SUFFIX,
 	localDateString,
 	escapeFrame,
 	isDailyLog,
+	normalizeDailyLogMode,
+	countLogEntries,
+	dailyLogPointer,
 	truncateToBytes,
 	readBounded,
 	readBoundedDetailed,
