@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { __internals } from "./dsh-memory-loader.mjs";
 
-const { localDateString, buildFrame, memoryCandidates, readBounded, sessionHasMarker, MARKER } = __internals;
+const { localDateString, buildFrame, memoryCandidates, readBounded, readBoundedDetailed, sessionHasMarker, truncateToBytes, isDailyLog, MARKER } = __internals;
 let failures = 0;
 
 function check(name, condition, detail = "") {
@@ -88,6 +88,48 @@ const plainEvent = { type: "user/message", data: { content: [{ type: "text", tex
 check("T8a marker detected", sessionHasMarker(fakeAgentWith({ 1: markerEvent })) === true);
 check("T8b no marker", sessionHasMarker(fakeAgentWith({ 1: plainEvent })) === false);
 check("T8c empty session", sessionHasMarker(undefined) === false);
+
+// T9 — a long day log must never evict a MEMORY.md (2026-09-11 regression:
+// a 30KB day log pushed both MEMORY.md files out of the 16KB frame)
+const longLog = "L".repeat(30000);
+loaded = [
+	{ label: "~/.dsh/memory/MEMORY.md", content: "GLOBAL-LONG" },
+	{ label: "memory/MEMORY.md", content: "PROJ-LONG" },
+	{ label: `memory/${today}.md`, content: longLog }
+];
+frame = buildFrame(loaded, 16384, { dailyLogMaxBytes: 4096 });
+check("T9a global MEMORY.md survives", frame.includes("GLOBAL-LONG"));
+check("T9b project MEMORY.md survives", frame.includes("PROJ-LONG"));
+check("T9c cap notice names the file", frame.includes(`capped memory/${today}.md to 4096 bytes (daily log)`));
+check("T9d no eviction notice", !frame.includes("omitted "));
+check("T9e frame within budget", Buffer.byteLength(frame, "utf8") <= 16384, `${Buffer.byteLength(frame, "utf8")} > 16384`);
+check("T9f day log actually cut", !frame.includes("L".repeat(5000)));
+
+// T9g — with the cap disabled the old eviction returns, proving the fix is load-bearing
+frame = buildFrame(loaded, 16384, { dailyLogMaxBytes: 1 << 30 });
+check("T9g uncapped log evicts both MEMORY.md", !frame.includes("GLOBAL-LONG") && !frame.includes("PROJ-LONG"));
+
+// T10 — the cap is byte-accurate for multibyte content (one CJK char = 3 bytes)
+const cjk = "中".repeat(5000);
+const capped = truncateToBytes(cjk, 4096);
+check("T10a multibyte cap within bytes", Buffer.byteLength(capped, "utf8") <= 4096, `${Buffer.byteLength(capped, "utf8")} > 4096`);
+check("T10b cap keeps content + suffix", capped.startsWith("中") && capped.includes("...(truncated"));
+check("T10c short text untouched", truncateToBytes("短", 4096) === "短");
+frame = buildFrame([{ label: `memory/${today}.md`, content: cjk }], 16384, { dailyLogMaxBytes: 4096 });
+check("T10d cjk frame within budget", Buffer.byteLength(frame, "utf8") <= 16384);
+check("T10e cjk cap notice", frame.includes(`capped memory/${today}.md to 4096 bytes`));
+
+// T11 — oversized sources are classified, so apply() can leave a notice
+check("T11a oversized classified", (await readBoundedDetailed(bigFile, 512)).state === "oversized");
+check("T11b oversized reports size", (await readBoundedDetailed(bigFile, 512)).bytes === 1000);
+check("T11c ok classified", (await readBoundedDetailed(bigFile, 2048)).state === "ok");
+check("T11d absent classified", (await readBoundedDetailed(path.join(root, "nope.md"), 65536)).state === "absent");
+check("T11e daily-log label detected", isDailyLog(`memory/${today}.md`) === true && isDailyLog("~/.dsh/memory/MEMORY.md") === false);
+
+// T12 — externally supplied notices survive even when no file loaded
+frame = buildFrame([], 16384, { notices: ["skipped memory/MEMORY.md (70000 bytes > maxSourceBytes 65536)"] });
+check("T12a notice-only frame built", typeof frame === "string" && frame.includes("Budget notice: skipped memory/MEMORY.md"));
+check("T12b no empty section", !frame.includes("Memory from:"));
 
 await rm(root, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);

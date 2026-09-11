@@ -1,4 +1,4 @@
-// dsh-memory-loader v1.0 — deterministic memory injection at session start.
+// dsh-memory-loader v1.2 — deterministic memory injection at session start.
 // Injects two-level memory (global ~/.dsh/memory + project <cwd>/memory) as a
 // durable user message at the first pre-step of each agent session, using the
 // same seam as @deepseek-ai/dsh-agent-instructions (see PLAN.md for evidence).
@@ -10,6 +10,11 @@
 //       config:
 //         maxBytes: 16384
 //         maxSourceBytes: 65536
+//         dailyLogMaxBytes: 4096
+//
+// Budget policy: daily logs (YYYY-MM-DD.md) are byte-capped first so a long day
+// log can never evict a MEMORY.md; then whole least-specific files are dropped;
+// only then is the tail of the most specific kept file truncated.
 
 import { stat, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -19,6 +24,9 @@ import { createUserMessage } from "@deepseek-ai/dsh-llm";
 export const PLUGIN_NAME = "dsh-memory-loader";
 const DEFAULT_MAX_BYTES = 16384;
 const DEFAULT_MAX_SOURCE_BYTES = 65536;
+const DEFAULT_DAILY_LOG_MAX_BYTES = 4096;
+const TRUNCATION_SUFFIX = "\n\n...(truncated; read the full file for the rest)";
+const DAILY_LOG_LABEL = /(^|\/)\d{4}-\d{2}-\d{2}\.md$/;
 const MEMORY_DIR = "memory";
 const MARKER = "auto-loaded by dsh-memory-loader";
 const FRAME_OPEN = "<system-reminder>";
@@ -40,17 +48,45 @@ function byteLength(text) {
 	return Buffer.byteLength(text, "utf8");
 }
 
-async function readBounded(file, maxSourceBytes) {
+function isDailyLog(label) {
+	return DAILY_LOG_LABEL.test(String(label));
+}
+
+// Byte-accurate head cut: the kept text plus `suffix` is at most `limit` bytes,
+// which matters because one CJK character is three UTF-8 bytes.
+function truncateToBytes(text, limit, suffix = TRUNCATION_SUFFIX) {
+	const source = String(text);
+	if (byteLength(source) <= limit) return source;
+	const candidate = (cut) => source.slice(0, cut) + suffix;
+	if (byteLength(candidate(0)) > limit) return "";
+	let lo = 0;
+	let hi = source.length;
+	while (lo < hi) {
+		const mid = Math.ceil((lo + hi) / 2);
+		if (byteLength(candidate(mid)) <= limit) lo = mid;
+		else hi = mid - 1;
+	}
+	return candidate(lo);
+}
+
+// Distinguishes "absent" from "present but over the per-file ceiling" so an
+// oversized memory file leaves a visible notice instead of vanishing silently.
+async function readBoundedDetailed(file, maxSourceBytes) {
 	try {
 		const info = await stat(file);
-		if (!info.isFile()) return undefined;
-		if (info.size > maxSourceBytes) return undefined;
+		if (!info.isFile()) return { state: "absent" };
+		if (info.size > maxSourceBytes) return { state: "oversized", bytes: info.size };
 		const content = await readFile(file, "utf8");
-		if (byteLength(content) > maxSourceBytes) return undefined;
-		return content;
+		if (byteLength(content) > maxSourceBytes) return { state: "oversized", bytes: byteLength(content) };
+		return { state: "ok", content };
 	} catch {
-		return undefined;
+		return { state: "absent" };
 	}
+}
+
+async function readBounded(file, maxSourceBytes) {
+	const result = await readBoundedDetailed(file, maxSourceBytes);
+	return result.state === "ok" ? result.content : undefined;
 }
 
 // Broad → specific: global long-term, global today, project long-term, project today.
@@ -75,23 +111,32 @@ function frameText(header, entries, notices) {
 	return parts.join("\n\n");
 }
 
-// Budget policy mirrors agent-instructions: drop whole least-specific files
-// first, then truncate the tail of the most specific kept file.
-function buildFrame(loaded, maxBytes) {
-	if (!Array.isArray(loaded) || loaded.length === 0) return undefined;
-	const header = `Memory context ${MARKER}. Long-term and today's memory for this workspace. Use it as background knowledge; workspace instructions (AGENTS.md) take precedence over this frame.\nDiscipline: when a session ends with substantive output, append a one-line summary to today's log under this workspace's memory directory (file name YYYY-MM-DD.md with today's local date; create the file if absent; skip for trivial sessions). For curating durable facts into MEMORY.md the user says「沉淀」which triggers the memory-keeper skill.`;
-	const kept = [...loaded];
-	const notices = [];
+// Budget policy: cap daily logs first (so they can never evict a MEMORY.md),
+// then drop whole least-specific files, then truncate the tail of the most
+// specific kept file. `options.notices` seeds externally detected problems
+// (for example a memory file skipped for exceeding maxSourceBytes).
+function buildFrame(loaded, maxBytes, options = {}) {
+	const entries = Array.isArray(loaded) ? loaded : [];
+	const rawDaily = Number(options?.dailyLogMaxBytes);
+	const dailyLogMaxBytes = Number.isSafeInteger(rawDaily) && rawDaily > 0 ? rawDaily : DEFAULT_DAILY_LOG_MAX_BYTES;
+	const notices = Array.isArray(options?.notices) ? [...options.notices] : [];
+	if (entries.length === 0 && notices.length === 0) return undefined;
+	const header = `Memory context ${MARKER}. Long-term and today's memory for this workspace. Use it as background knowledge; workspace instructions (AGENTS.md) take precedence over this frame.\nDiscipline: when a session ends with substantive output, append a one-line summary to today's log under this workspace's memory directory (file name YYYY-MM-DD.md with today's local date; create the file if absent; skip for trivial sessions). Keep each log entry to one line and move long detail into a named topic file under memory/: daily logs are capped at ${dailyLogMaxBytes} bytes when injected. For curating durable facts into MEMORY.md the user says「沉淀」which triggers the memory-keeper skill.`;
+	const kept = entries.map((entry) => {
+		if (!isDailyLog(entry.label)) return entry;
+		if (byteLength(entry.content) <= dailyLogMaxBytes) return entry;
+		notices.push(`capped ${entry.label} to ${dailyLogMaxBytes} bytes (daily log)`);
+		return { ...entry, content: truncateToBytes(entry.content, dailyLogMaxBytes) };
+	});
 	while (kept.length > 1 && byteLength(frameText(header, kept, notices)) > maxBytes) {
 		const dropped = kept.shift();
 		notices.push(`omitted ${dropped.label}`);
 	}
-	if (byteLength(frameText(header, kept, notices)) > maxBytes) {
+	if (kept.length > 0 && byteLength(frameText(header, kept, notices)) > maxBytes) {
 		const last = kept[kept.length - 1];
-		const truncationSuffix = "\n\n...(truncated; read the full file for the rest)";
 		notices.push(`truncated ${last.label}`);
 		const probe = (cut) => {
-			const candidate = { ...last, content: last.content.slice(0, cut) + truncationSuffix };
+			const candidate = { ...last, content: last.content.slice(0, cut) + TRUNCATION_SUFFIX };
 			return byteLength(frameText(header, [...kept.slice(0, -1), candidate], notices)) <= maxBytes;
 		};
 		let lo = 0;
@@ -100,14 +145,14 @@ function buildFrame(loaded, maxBytes) {
 			// Even an empty cut overflows the budget: drop the whole file instead.
 			kept.pop();
 			notices[notices.length - 1] = `omitted ${last.label}`;
-			if (kept.length === 0) return undefined;
+			if (kept.length === 0) return notices.length > 0 ? frameText(header, kept, notices) : undefined;
 		} else {
 			while (lo < hi) {
 				const mid = Math.ceil((lo + hi) / 2);
 				if (probe(mid)) lo = mid;
 				else hi = mid - 1;
 			}
-			kept[kept.length - 1] = { ...last, content: last.content.slice(0, lo) + truncationSuffix };
+			kept[kept.length - 1] = { ...last, content: last.content.slice(0, lo) + TRUNCATION_SUFFIX };
 		}
 	}
 	return frameText(header, kept, notices);
@@ -138,8 +183,10 @@ function sessionHasMarker(agent) {
 export function apply(ctx, config = {}) {
 	const rawMax = Number(config?.maxBytes);
 	const rawSource = Number(config?.maxSourceBytes);
+	const rawDaily = Number(config?.dailyLogMaxBytes);
 	const maxBytes = Number.isSafeInteger(rawMax) && rawMax > 0 ? rawMax : DEFAULT_MAX_BYTES;
 	const maxSourceBytes = Number.isSafeInteger(rawSource) && rawSource > 0 ? rawSource : DEFAULT_MAX_SOURCE_BYTES;
+	const dailyLogMaxBytes = Number.isSafeInteger(rawDaily) && rawDaily > 0 ? rawDaily : DEFAULT_DAILY_LOG_MAX_BYTES;
 	const composed = new WeakSet();
 
 	ctx.on("agent/pre-step", async ({ agent, messages, signal }, next) => {
@@ -158,15 +205,22 @@ export function apply(ctx, config = {}) {
 			const today = localDateString();
 			const home = homedir();
 			const loaded = [];
+			const notices = [];
 			for (const candidate of memoryCandidates(cwd, home, today)) {
 				signal?.throwIfAborted?.();
-				const content = await readBounded(candidate.file, maxSourceBytes);
-				if (content !== undefined && content.trim().length > 0) loaded.push({ ...candidate, content });
+				const result = await readBoundedDetailed(candidate.file, maxSourceBytes);
+				if (result.state === "oversized") {
+					notices.push(`skipped ${candidate.label} (${result.bytes} bytes > maxSourceBytes ${maxSourceBytes})`);
+					continue;
+				}
+				if (result.state !== "ok") continue;
+				if (result.content.trim().length === 0) continue;
+				loaded.push({ ...candidate, content: result.content });
 			}
 			composed.add(agent);
-			if (loaded.length === 0) return decision;
+			if (loaded.length === 0 && notices.length === 0) return decision;
 
-			const text = buildFrame(loaded, maxBytes);
+			const text = buildFrame(loaded, maxBytes, { dailyLogMaxBytes, notices });
 			if (text === undefined) return decision;
 			const desired = createUserMessage({
 				content: [{ type: "text", text }],
@@ -188,9 +242,14 @@ export function apply(ctx, config = {}) {
 
 export const __internals = {
 	MARKER,
+	DEFAULT_DAILY_LOG_MAX_BYTES,
+	TRUNCATION_SUFFIX,
 	localDateString,
 	escapeFrame,
+	isDailyLog,
+	truncateToBytes,
 	readBounded,
+	readBoundedDetailed,
 	memoryCandidates,
 	buildFrame,
 	sessionHasMarker
