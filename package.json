@@ -1,7 +1,7 @@
 {
   "name": "dsh-memory-loader",
-  "version": "1.3.0",
-  "description": "Deterministic two-level memory injection for DeepSeek Harness: global and project MEMORY.md plus today's notes, auto-loaded into every new session. v1.3.0 injects day logs as a one-line pointer by default (dailyLogMode: pointer|full|off) so flow records stop competing with the MEMORY.md indexes; v1.2.0 capped day logs and reported skipped oversized files.",
+  "version": "1.3.1",
+  "description": "Deterministic two-level memory injection for DeepSeek Harness: global and project MEMORY.md plus today's notes, auto-loaded into every new session. v1.3.1 fixes session-format-v4 source attribution (DSH 0.2.0 desktop refused the retired kind:\"plugin\" wrapper, failing every session). v1.3.0 injects day logs as a one-line pointer by default (dailyLogMode: pointer|full|off) so flow records stop competing with the MEMORY.md indexes; v1.2.0 capped day logs and reported skipped oversized files.",
   "type": "module",
   "main": "./dsh-memory-loader.mjs",
   "scripts": {

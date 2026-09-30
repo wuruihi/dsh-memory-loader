@@ -3,7 +3,7 @@
 // durable user message at the first pre-step of each agent session, using the
 // same seam as @deepseek-ai/dsh-agent-instructions (see PLAN.md for evidence).
 //
-// Mount: ~/.dsh/profiles/web/cordis.patch.yml
+// Mount (DSH 0.1.x, web profile) — ~/.dsh/profiles/web/cordis.patch.yml
 //   - insert:
 //     - id: dsh-memory-loader
 //       name: file:///C:/Users/wurui/.dsh/profiles/web/dsh-memory-loader/dsh-memory-loader.mjs
@@ -12,6 +12,17 @@
 //         maxSourceBytes: 65536
 //         dailyLogMode: pointer
 //         dailyLogMaxBytes: 4096
+//
+// Mount (DSH 0.2.0 desktop GUI) — installed as a bundle into the app-owned
+// "desktop" profile through the sidebar Plugins page (local absolute path);
+// it lands in ~/.dsh/profiles/desktop/node_modules as a link to this repo, so
+// an edit here is the installed plugin after a desktop-app restart.
+//
+// v1.3.1 — session format v4 fix: the injected message must carry a
+// producer-owned source kind (`plugin:dsh-memory-loader`). v1.3.0 wrote the
+// retired `{ kind: "plugin", plugin }` wrapper, which DSH 0.2.0 refuses with
+// "format v4 message requires a producer-owned source kind" — every session
+// failed while the plugin was mounted in the desktop profile.
 //
 // Content policy (what deserves a slot in *every* session): MEMORY.md indexes
 // are pointers by nature and are injected whole; day logs are push-only flow
@@ -31,6 +42,11 @@ import path from "node:path";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 
 export const PLUGIN_NAME = "dsh-memory-loader";
+// Producer-owned source kind for the injected message. DSH 0.2.0 (session format
+// v4) refuses the retired `kind: "plugin"` wrapper; non-bundled producers are
+// named `plugin:<package name>` — the same kind the v3→v4 migration assigns to
+// the rows this plugin wrote under 0.1.x, so migrated and fresh rows agree.
+export const SOURCE_KIND = `plugin:${PLUGIN_NAME}`;
 const DEFAULT_MAX_BYTES = 16384;
 const DEFAULT_MAX_SOURCE_BYTES = 65536;
 const DEFAULT_DAILY_LOG_MAX_BYTES = 4096;
@@ -218,6 +234,17 @@ function buildFrame(loaded, maxBytes, options = {}) {
 	return frameText(header, kept, notices);
 }
 
+// Producer attribution of the injected message. v1.3.0 wrote the retired
+// `{ kind: "plugin", plugin }` wrapper; DSH 0.2.0's session format v4 refuses
+// that shape ("format v4 message requires a producer-owned source kind"), so the
+// source kind names the producer itself and the `plugin` field is gone.
+function injectionMessage(text) {
+	return createUserMessage({
+		content: [{ type: "text", text }],
+		source: { kind: SOURCE_KIND }
+	});
+}
+
 // Marker-absent injection rule: one mechanism covers fresh sessions, resume,
 // non-fork subagents (they *should* get memory), and fork-type inheritance.
 function sessionHasMarker(agent) {
@@ -283,10 +310,7 @@ export function apply(ctx, config = {}) {
 
 			const text = buildFrame(loaded, maxBytes, { dailyLogMaxBytes, dailyLogMode, notices });
 			if (text === undefined) return decision;
-			const desired = createUserMessage({
-				content: [{ type: "text", text }],
-				source: { kind: "plugin", plugin: PLUGIN_NAME }
-			});
+			const desired = injectionMessage(text);
 			const lastClaimedIndex = decision.messages.findLastIndex((message) => messages.includes(message));
 			return {
 				kind: "enter",
@@ -303,6 +327,8 @@ export function apply(ctx, config = {}) {
 
 export const __internals = {
 	MARKER,
+	SOURCE_KIND,
+	injectionMessage,
 	DEFAULT_DAILY_LOG_MAX_BYTES,
 	DEFAULT_DAILY_LOG_MODE,
 	TRUNCATION_SUFFIX,

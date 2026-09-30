@@ -56,6 +56,12 @@ dsh plugin --profile web add https://github.com/wuruihi/dsh-memory-loader/archiv
 
 patch 变更由 `watchUserPatches` 热应用，无需重启。
 
+### 方式 C：桌面版 GUI（DSH 0.2.0 桌面版用这条）
+
+桌面版把装插件做成了侧栏的**插件**页：**添加插件 → 填本地绝对路径（本仓库根目录）→ 安装 → 启用**。该页面只接受「组合包」形态，本仓库已在 `package.json` 里声明 `dsh.bundle.patch`，符合要求。装完落点是 `~/.dsh/profiles/desktop/node_modules/`，且以链接指向本仓库——**改本仓库源码就等于改了已安装的插件**。改 `.mjs` 需要重启桌面 App 生效；改插件配置（config 段）由 patchReload 热生效。
+
+> **版本边界（2026-09-30 实测）**：DSH 0.2.0 的会话格式升到 v4，注入消息必须携带 producer-owned source kind。v1.3.0 及更早写的是已废弃的 `{ kind: "plugin", plugin }`，会让桌面版**每个会话**报错 `format v4 message requires a producer-owned source kind`；v1.3.1 起改为 `plugin:dsh-memory-loader`（与 v3→v4 迁移给旧行分配的 kind 一致）。
+
 ## 配置
 
 | 键 | 默认 | 说明 |
@@ -82,7 +88,7 @@ patch 变更由 `watchUserPatches` 热应用，无需重启。
 node selfcheck.mjs
 ```
 
-53 项自检覆盖：四文件加载顺序、预算整丢/截断策略、当日日志三种模式（pointer 默认／full／off，含"关掉指针则正文回灌"的反证）、帧转义、日期文件名、有界读取、幂等标记。本机另有端到端验证记录（headless 会话哨兵注入 + 会话存储解压取证 + 回滚对照），见交付报告。
+53 项自检覆盖：四文件加载顺序、预算整丢/截断策略、当日日志三种模式（pointer 默认／full／off，含"关掉指针则正文回灌"的反证）、帧转义、日期文件名、有界读取、幂等标记。v1.3.1 起另有 6 项（T14a–f）钉住注入消息的 source：必须是 producer-owned kind、不得再出现已废弃的 `kind: "plugin"`。本机另有端到端验证记录（headless 会话哨兵注入 + 会话存储解压取证 + 回滚对照），见交付报告。
 
 ## License
 

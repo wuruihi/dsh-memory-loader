@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { __internals } from "./dsh-memory-loader.mjs";
 
-const { localDateString, buildFrame, memoryCandidates, readBounded, readBoundedDetailed, sessionHasMarker, truncateToBytes, isDailyLog, normalizeDailyLogMode, DEFAULT_DAILY_LOG_MODE, MARKER } = __internals;
+const { localDateString, buildFrame, memoryCandidates, readBounded, readBoundedDetailed, sessionHasMarker, truncateToBytes, isDailyLog, normalizeDailyLogMode, DEFAULT_DAILY_LOG_MODE, MARKER, injectionMessage } = __internals;
 let failures = 0;
 
 function check(name, condition, detail = "") {
@@ -165,6 +165,25 @@ check("T13m full mode injects body", frame.includes("第一条结论"));
 
 // T13n — nothing but a day log + off ⇒ no frame at all (nothing worth saying)
 check("T13n off with only a day log", buildFrame([{ label: `memory/${today}.md`, content: logBody }], 16384, { dailyLogMode: "off" }) === undefined);
+
+// T14 — the injected message carries a producer-owned source kind.
+// Regression (2026-09-30): installing this plugin into the DSH 0.2.0 desktop
+// profile broke every session with "format v4 message requires a producer-owned
+// source kind" — DSH 0.2.0's session format v4 refuses the retired
+// `{ kind: "plugin", plugin }` wrapper that v1.3.0 wrote. The kind must instead
+// name the producer itself (`plugin:<plugin name>`, the same kind the v3→v4
+// migration assigns to rows this plugin wrote under 0.1.x).
+const injected = injectionMessage("FRAME-TEXT");
+check("T14a user role", injected.role === "user", `role=${injected.role}`);
+check("T14b has identity", typeof injected.id === "string" && injected.id.length > 0);
+check("T14c has content", injected.content?.[0]?.type === "text" && injected.content[0].text === "FRAME-TEXT");
+check(
+	"T14d producer-owned source kind",
+	typeof injected.source?.kind === "string" && injected.source.kind.length > 0 && injected.source.kind !== "plugin",
+	`kind=${JSON.stringify(injected.source?.kind)}`
+);
+check("T14e kind names the producer", String(injected.source?.kind).includes("dsh-memory-loader"), `kind=${JSON.stringify(injected.source?.kind)}`);
+check("T14f no retired plugin field", injected.source?.plugin === undefined, `plugin=${JSON.stringify(injected.source?.plugin)}`);
 
 await rm(root, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL CHECKS PASSED" : `\n${failures} CHECK(S) FAILED`);
